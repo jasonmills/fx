@@ -208,7 +208,7 @@ type lifecycleHookAnnotation struct {
 	Type          _lifecycleHookAnnotationType
 	Target        interface{}
 	_targetType   *reflect.Type
-	_targetParams *[]reflect.Type
+	_targetParams *reflect.Type
 }
 
 func (la *lifecycleHookAnnotation) apply(ann *annotated) error {
@@ -235,7 +235,7 @@ func (la *lifecycleHookAnnotation) targetType() (targetType reflect.Type) {
 	return
 }
 
-func (la *lifecycleHookAnnotation) parameters() (param []reflect.Type) {
+func (la *lifecycleHookAnnotation) parameters() (param reflect.Type) {
 	if la._targetParams != nil {
 		return *la._targetParams
 	}
@@ -266,7 +266,7 @@ func (la *lifecycleHookAnnotation) parameters() (param []reflect.Type) {
 		})
 	}
 
-	param = []reflect.Type{reflect.StructOf(params)}
+	param = reflect.StructOf(params)
 	la._targetParams = &param
 	return
 }
@@ -311,13 +311,15 @@ func (la *lifecycleHookAnnotation) Build() (*reflect.Value, error) {
 	}
 
 	// build params with lifecycle
-	params := append([]reflect.Type{_typeOfLifecycle}, la.parameters()...)
+	params := []reflect.Type{la.parameters()}
 	origFn := reflect.ValueOf(la.Target)
 	newFnType := reflect.FuncOf(params, nil, false)
 
 	newFn := reflect.MakeFunc(newFnType, func(args []reflect.Value) []reflect.Value {
-		if len(args) > 0 {
-			o := args[0]
+		// first arg is the In type; second is the lifecycle type, remainer
+		// are the dynamic hook arguments
+		if len(args) >= 2 {
+			o := args[1]
 			if lc, ok := o.Interface().(Lifecycle); ok {
 				hookFn := func(ctx context.Context) error {
 					// replace first argument with value of context
@@ -544,6 +546,16 @@ func (ann *annotated) parameters() (
 			field.Tag = reflect.StructTag(`optional:"true"`)
 		}
 
+		inFields = append(inFields, field)
+	}
+
+	// append required types for hooks to types field, but do not
+	// include them as params in constructor call
+	for h, t := range ann.Hooks {
+		field := reflect.StructField{
+			Name: fmt.Sprintf("Hook%d", h),
+			Type: t.parameters(),
+		}
 		inFields = append(inFields, field)
 	}
 
