@@ -210,8 +210,28 @@ type lifecycleHookAnnotation struct {
 }
 
 func (la *lifecycleHookAnnotation) apply(ann *annotated) error {
+	name := "UnknownHookAnnotation"
+	switch la.Type {
+	case _onStartHookType:
+		name = _onStartHook
+	case _onStopHookType:
+		name = _onStopHook
+	}
+
 	if la.Target == nil {
-		return errors.New("cannot apply an empty lifecylce hook")
+		return fmt.Errorf(
+			"cannot use nil function for %v hook annotation",
+			name,
+		)
+	}
+
+	for _, h := range ann.Hooks {
+		if h.Type == la.Type {
+			return fmt.Errorf(
+				"cannot apply more than one %v hook annotation",
+				name,
+			)
+		}
 	}
 
 	ann.Hooks = append(ann.Hooks, la)
@@ -243,7 +263,6 @@ func (la *lifecycleHookAnnotation) parameters(results ...reflect.Type) (
 		pos     int
 		resolve func(reflect.Value) reflect.Value
 	}, len(results))
-	fmt.Printf("Debug result scrub: %+v\n", results)
 	for offset, r := range results {
 		switch r.Kind() {
 		case reflect.Struct:
@@ -300,7 +319,6 @@ func (la *lifecycleHookAnnotation) parameters(results ...reflect.Type) (
 
 		// if a type is not provided by the constructor results
 		// add it to our in struct to be injected
-		fmt.Printf("Debug result scrub: %v, %+v\n", isProvidedByResults, resultIdx)
 		if !isProvidedByResults {
 			field := reflect.StructField{
 				Name: fmt.Sprintf("Field%d", i),
@@ -336,7 +354,6 @@ func (la *lifecycleHookAnnotation) parameters(results ...reflect.Type) (
 
 	in = reflect.StructOf(params)
 
-	fmt.Printf("Debug in struct: %+v\n", in)
 	argmap = func(
 		args []reflect.Value,
 	) (lc Lifecycle, remapped []reflect.Value) {
@@ -353,7 +370,6 @@ func (la *lifecycleHookAnnotation) parameters(results ...reflect.Type) (
 
 		for i := 1; i < ft.NumIn(); i++ {
 			m, exists := argPosIdx[i]
-			fmt.Printf("Closure index exists(%v): %+v\n", exists, m)
 			if exists {
 				if m.result {
 					remapped[m.idx] = m.resolve(results)
@@ -364,7 +380,6 @@ func (la *lifecycleHookAnnotation) parameters(results ...reflect.Type) (
 			}
 		}
 
-		fmt.Printf("Closure remapped args: %+v\n", remapped)
 		return
 	}
 	return

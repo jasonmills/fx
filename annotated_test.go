@@ -991,6 +991,12 @@ func TestAnnotate(t *testing.T) {
 func testHookAnnotations(t *testing.T) {
 	t.Parallel()
 
+	validateApp := func(t *testing.T, opts ...fx.Option) error {
+		return fx.ValidateApp(
+			append(opts, fx.Logger(fxtest.NewTestPrinter(t)))...,
+		)
+	}
+
 	t.Run("depend on result interface of target", func(t *testing.T) {
 		//t.Skip()
 		type stub interface {
@@ -1193,11 +1199,6 @@ func testHookAnnotations(t *testing.T) {
 			b interface{}
 		)
 
-		validateApp := func(t *testing.T, opts ...fx.Option) error {
-			return fx.ValidateApp(
-				append(opts, fx.Logger(fxtest.NewTestPrinter(t)))...,
-			)
-		}
 		err := validateApp(t,
 			fx.Provide(
 				fx.Annotate(
@@ -1234,6 +1235,26 @@ func testHookAnnotations(t *testing.T) {
 		err := app.Start(context.Background())
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "hook failed")
+	})
+
+	t.Run("error with multiple hooks of the same type", func(t *testing.T) {
+		t.Parallel()
+
+		type stub interface{}
+
+		err := validateApp(t,
+			fx.Provide(
+				fx.Annotate(
+					func() stub { return nil },
+					fx.OnStart(func(context.Context) error { return nil }),
+					fx.OnStart(func(context.Context) error { return nil }),
+				),
+			),
+			fx.Invoke(func(s stub) {}),
+		)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "cannot apply more than one")
 	})
 
 }
