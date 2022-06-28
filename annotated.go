@@ -348,6 +348,22 @@ func (la *lifecycleHookAnnotation) Build() (*reflect.Value, error) {
 	return &newFn, nil
 }
 
+// OnStart TBD
+func OnStart(onStart interface{}) Annotation {
+	return &lifecycleHookAnnotation{
+		Type:   _onStartHookType,
+		Target: onStart,
+	}
+}
+
+// OnStop TBD
+func OnStop(onStop interface{}) Annotation {
+	return &lifecycleHookAnnotation{
+		Type:   _onStopHookType,
+		Target: onStop,
+	}
+}
+
 type asAnnotation struct {
 	targets []interface{}
 }
