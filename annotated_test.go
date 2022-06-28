@@ -992,7 +992,7 @@ func testHookAnnotations(t *testing.T) {
 	t.Parallel()
 
 	t.Run("depend on result interface of target", func(t *testing.T) {
-		t.Skip()
+		//t.Skip()
 		type stub interface {
 			String() string
 		}
