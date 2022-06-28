@@ -239,19 +239,37 @@ func (la *lifecycleHookAnnotation) parameters(results ...reflect.Type) (
 	// and to allow us to interleave constructor results
 	// into our hook arguments.
 	resultMap := make(map[reflect.Type]struct {
-		offset int
-		pos    int
+		offset  int
+		pos     int
+		resolve func(reflect.Value) reflect.Value
 	}, len(results))
+	fmt.Printf("Debug result scrub: %+v\n", results)
 	for offset, r := range results {
-		if r.Kind() == reflect.Struct {
+		switch r.Kind() {
+		case reflect.Struct:
 			for pos := 1; pos < r.NumField(); pos++ {
 				resultMap[r] = struct {
-					offset int
-					pos    int
+					offset  int
+					pos     int
+					resolve func(reflect.Value) reflect.Value
 				}{
 					offset: offset,
 					pos:    pos,
+					resolve: func(v reflect.Value) reflect.Value {
+						return v.Field(offset + 1).Field(pos)
+					},
 				}
+			}
+		case reflect.Interface:
+			resultMap[r] = struct {
+				offset  int
+				pos     int
+				resolve func(reflect.Value) reflect.Value
+			}{
+				offset: offset,
+				resolve: func(v reflect.Value) reflect.Value {
+					return v
+				},
 			}
 		}
 	}
@@ -270,10 +288,9 @@ func (la *lifecycleHookAnnotation) parameters(results ...reflect.Type) (
 	}
 
 	argPosIdx := map[int]struct {
-		result   bool
-		idx      int
-		offset   int
-		fieldIdx int
+		result  bool
+		idx     int
+		resolve func(reflect.Value) reflect.Value
 	}{}
 
 	ft := la.targetType()
@@ -283,6 +300,7 @@ func (la *lifecycleHookAnnotation) parameters(results ...reflect.Type) (
 
 		// if a type is not provided by the constructor results
 		// add it to our in struct to be injected
+		fmt.Printf("Debug result scrub: %v, %+v\n", isProvidedByResults, resultIdx)
 		if !isProvidedByResults {
 			field := reflect.StructField{
 				Name: fmt.Sprintf("Field%d", i),
@@ -290,31 +308,35 @@ func (la *lifecycleHookAnnotation) parameters(results ...reflect.Type) (
 			}
 			params = append(params, field)
 			argPosIdx[i] = struct {
-				result   bool
-				idx      int
-				offset   int
-				fieldIdx int
+				result  bool
+				idx     int
+				resolve func(reflect.Value) reflect.Value
 			}{
-				idx:      i,
-				fieldIdx: i + 2,
+				idx: i,
+				resolve: func(v reflect.Value) (value reflect.Value) {
+					if i <= v.NumField() {
+						value = v.Field(i - 1)
+					}
+					return
+				},
 			}
 			continue
 		}
 
 		argPosIdx[i] = struct {
-			result   bool
-			idx      int
-			offset   int
-			fieldIdx int
+			result  bool
+			idx     int
+			resolve func(reflect.Value) reflect.Value
 		}{
-			result:   true,
-			idx:      i,
-			offset:   resultIdx.offset,
-			fieldIdx: resultIdx.pos,
+			result:  true,
+			idx:     i,
+			resolve: resultIdx.resolve,
 		}
 	}
 
 	in = reflect.StructOf(params)
+
+	fmt.Printf("Debug in struct: %+v\n", in)
 	argmap = func(
 		args []reflect.Value,
 	) (lc Lifecycle, remapped []reflect.Value) {
@@ -330,21 +352,19 @@ func (la *lifecycleHookAnnotation) parameters(results ...reflect.Type) (
 		lc, _ = p.FieldByName("Lifecycle").Interface().(Lifecycle)
 
 		for i := 1; i < ft.NumIn(); i++ {
-			var value reflect.Value
 			m, exists := argPosIdx[i]
+			fmt.Printf("Closure index exists(%v): %+v\n", exists, m)
 			if exists {
 				if m.result {
-					value = results.Field(m.offset + 1).Field(m.fieldIdx)
+					remapped[m.idx] = m.resolve(results)
 					continue
 				}
 
-				if m.fieldIdx <= p.NumField() {
-					value = p.Field(m.fieldIdx - 1)
-				}
+				remapped[m.idx] = m.resolve(p)
 			}
-			remapped[m.idx] = value
 		}
 
+		fmt.Printf("Closure remapped args: %+v\n", remapped)
 		return
 	}
 	return
