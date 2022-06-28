@@ -205,10 +205,8 @@ const (
 )
 
 type lifecycleHookAnnotation struct {
-	Type          _lifecycleHookAnnotationType
-	Target        interface{}
-	_targetType   *reflect.Type
-	_targetParams *reflect.Type
+	Type   _lifecycleHookAnnotationType
+	Target interface{}
 }
 
 func (la *lifecycleHookAnnotation) apply(ann *annotated) error {
@@ -226,28 +224,39 @@ var (
 )
 
 func (la *lifecycleHookAnnotation) targetType() (targetType reflect.Type) {
-	if la._targetType != nil {
-		return *la._targetType
-	}
-
-	targetType = reflect.TypeOf(la.Target)
-	la._targetType = &targetType
-	return
+	return reflect.TypeOf(la.Target)
 }
 
-func (la *lifecycleHookAnnotation) parameters() (param reflect.Type) {
-	if la._targetParams != nil {
-		return *la._targetParams
+func (la *lifecycleHookAnnotation) parameters(results ...reflect.Type) (
+	in reflect.Type,
+	argmap func(
+		args []reflect.Value,
+	) (Lifecycle, []reflect.Value),
+) {
+
+	// index the constructor results by type and position to allow
+	// for us to omit these from the in types that must be injected,
+	// and to allow us to interleave constructor results
+	// into our hook arguments.
+	resultMap := make(map[reflect.Type]struct {
+		offset int
+		pos    int
+	}, len(results))
+	for offset, r := range results {
+		if r.Kind() == reflect.Struct {
+			for pos := 1; pos < r.NumField(); pos++ {
+				resultMap[r] = struct {
+					offset int
+					pos    int
+				}{
+					offset: offset,
+					pos:    pos,
+				}
+			}
+		}
 	}
 
-	ft := la.targetType()
-	// omit first parameter as it should be a context.Context
-	types := make([]reflect.Type, ft.NumIn())
-
-	for i := 1; i < ft.NumIn(); i++ {
-		types[i] = ft.In(i)
-	}
-
+	// hook functions require a lifecycle, and it should be injected
 	params := []reflect.StructField{
 		{
 			Name:      "In",
@@ -260,18 +269,84 @@ func (la *lifecycleHookAnnotation) parameters() (param reflect.Type) {
 		},
 	}
 
-	var zero reflect.Type
-	for i, t := range types {
-		if t != zero && t.Kind() != reflect.Invalid {
-			params = append(params, reflect.StructField{
+	argPosIdx := map[int]struct {
+		result   bool
+		idx      int
+		offset   int
+		fieldIdx int
+	}{}
+
+	ft := la.targetType()
+	for i := 1; i < ft.NumIn(); i++ {
+		t := ft.In(i)
+		resultIdx, isProvidedByResults := resultMap[t]
+
+		// if a type is not provided by the constructor results
+		// add it to our in struct to be injected
+		if !isProvidedByResults {
+			field := reflect.StructField{
 				Name: fmt.Sprintf("Field%d", i),
 				Type: t,
-			})
+			}
+			params = append(params, field)
+			argPosIdx[i] = struct {
+				result   bool
+				idx      int
+				offset   int
+				fieldIdx int
+			}{
+				idx:      i,
+				fieldIdx: i + 2,
+			}
+			continue
+		}
+
+		argPosIdx[i] = struct {
+			result   bool
+			idx      int
+			offset   int
+			fieldIdx int
+		}{
+			result:   true,
+			idx:      i,
+			offset:   resultIdx.offset,
+			fieldIdx: resultIdx.pos,
 		}
 	}
 
-	param = reflect.StructOf(params)
-	la._targetParams = &param
+	in = reflect.StructOf(params)
+	argmap = func(
+		args []reflect.Value,
+	) (lc Lifecycle, remapped []reflect.Value) {
+		remapped = make([]reflect.Value, ft.NumIn())
+
+		if len(args) == 0 {
+			return
+		}
+
+		p := args[0]
+		results := args[1]
+
+		lc, _ = p.FieldByName("Lifecycle").Interface().(Lifecycle)
+
+		for i := 1; i < ft.NumIn(); i++ {
+			var value reflect.Value
+			m, exists := argPosIdx[i]
+			if exists {
+				if m.result {
+					value = results.Field(m.offset + 1).Field(m.fieldIdx)
+					continue
+				}
+
+				if m.fieldIdx <= p.NumField() {
+					value = p.Field(m.fieldIdx - 1)
+				}
+			}
+			remapped[m.idx] = value
+		}
+
+		return
+	}
 	return
 }
 
@@ -286,7 +361,7 @@ func (la *lifecycleHookAnnotation) buildHook(fn func(context.Context) error) (ho
 	return
 }
 
-func (la *lifecycleHookAnnotation) Build() (reflect.Value, error) {
+func (la *lifecycleHookAnnotation) Build(results ...reflect.Type) (reflect.Value, error) {
 	ft := la.targetType()
 
 	var newFn reflect.Value
@@ -316,44 +391,38 @@ func (la *lifecycleHookAnnotation) Build() (reflect.Value, error) {
 		)
 	}
 
-	// build params with lifecycle
-	params := []reflect.Type{la.parameters()}
+	in, paramMap := la.parameters(results...)
+	params := []reflect.Type{in}
+	for _, r := range results {
+		if r != _typeOfError {
+			params = append(params, r)
+		}
+	}
+
 	origFn := reflect.ValueOf(la.Target)
 	newFnType := reflect.FuncOf(params, nil, false)
-
 	newFn = reflect.MakeFunc(newFnType, func(args []reflect.Value) []reflect.Value {
-		// first arg is the In type; second is the lifecycle type, remainer
-		// are the dynamic hook arguments
-		if len(args) != 0 {
-			o := args[0].FieldByName("Lifecycle")
-			if lc, ok := o.Interface().(Lifecycle); ok {
-				hookFn := func(ctx context.Context) error {
-					fnArgs := []reflect.Value{
-						reflect.ValueOf(ctx),
-					}
-					if args[0].NumField() > 2 {
-						for i := 2; i < args[0].NumField(); i++ {
-							fnArgs = append(fnArgs, args[0].Field(i))
-						}
-					}
-					var results []reflect.Value
-					if ft.IsVariadic() {
-						results = origFn.CallSlice(fnArgs)
-					} else {
-						results = origFn.Call(fnArgs)
-					}
+		var lc Lifecycle
+		lc, args = paramMap(args)
+		hookFn := func(ctx context.Context) error {
+			args[0] = reflect.ValueOf(ctx)
 
-					if len(results) > 0 && results[0].Type() == _typeOfError {
-						err, _ := results[0].Interface().(error)
-						return err
-					}
-
-					return nil
-				}
-
-				lc.Append(la.buildHook(hookFn))
+			var results []reflect.Value
+			if ft.IsVariadic() {
+				results = origFn.CallSlice(args)
+			} else {
+				results = origFn.Call(args)
 			}
+
+			if len(results) > 0 && results[0].Type() == _typeOfError {
+				err, _ := results[0].Interface().(error)
+				return err
+			}
+
+			return nil
 		}
+
+		lc.Append(la.buildHook(hookFn))
 		return []reflect.Value{}
 	})
 
@@ -477,15 +546,15 @@ func (ann *annotated) Build() (interface{}, error) {
 		return nil, fmt.Errorf("invalid annotation function %T: %w", ann.Target, err)
 	}
 
-	paramTypes, remapParams, hookParams := ann.parameters()
 	resultTypes, remapResults, err := ann.results()
 	if err != nil {
 		return nil, err
 	}
+	paramTypes, remapParams, hookParams := ann.parameters(resultTypes...)
 
 	var hooks []reflect.Value
 	for _, hook := range ann.Hooks {
-		hookFn, err := hook.Build()
+		hookFn, err := hook.Build(resultTypes...)
 		if err != nil {
 			return nil, err
 		}
@@ -518,8 +587,7 @@ func (ann *annotated) Build() (interface{}, error) {
 		}
 
 		for i, hook := range hooks {
-			hookArgs := hookParams(i, origArgs)
-			// TODO: assign hookArgs that are of the same type as constructor results
+			hookArgs := hookParams(i, origArgs, results)
 			hook.Call(hookArgs)
 		}
 
@@ -559,10 +627,10 @@ func (ann *annotated) typeCheckOrigFn() error {
 // parameters returns the type for the parameters of the annotated function,
 // and a function that maps the arguments of the annotated function
 // back to the arguments of the target function.
-func (ann *annotated) parameters() (
+func (ann *annotated) parameters(results ...reflect.Type) (
 	types []reflect.Type,
 	remap func([]reflect.Value) []reflect.Value,
-	hookValueMap func(int, []reflect.Value) []reflect.Value,
+	hookValueMap func(int, []reflect.Value, []reflect.Value) []reflect.Value,
 ) {
 	ft := reflect.TypeOf(ann.Target)
 
@@ -576,7 +644,7 @@ func (ann *annotated) parameters() (
 	if len(ann.ParamTags) == 0 && !ft.IsVariadic() && len(ann.Hooks) == 0 {
 		return types, func(args []reflect.Value) []reflect.Value {
 			return args
-		}, func(int, []reflect.Value) (out []reflect.Value) { return }
+		}, func(int, []reflect.Value, []reflect.Value) (out []reflect.Value) { return }
 	}
 
 	// Turn parameters into an fx.In struct.
@@ -609,11 +677,12 @@ func (ann *annotated) parameters() (
 	// append required types for hooks to types field, but do not
 	// include them as params in constructor call
 	for h, t := range ann.Hooks {
-		params := t.parameters()
-		inFields = append(inFields, reflect.StructField{
+		params, _ := t.parameters(results...)
+		field := reflect.StructField{
 			Name: fmt.Sprintf("Hook%d", h),
 			Type: params,
-		})
+		}
+		inFields = append(inFields, field)
 	}
 
 	types = []reflect.Type{reflect.StructOf(inFields)}
@@ -627,7 +696,7 @@ func (ann *annotated) parameters() (
 		return args
 	}
 
-	hookValueMap = func(hook int, args []reflect.Value) (out []reflect.Value) {
+	hookValueMap = func(hook int, args []reflect.Value, results []reflect.Value) (out []reflect.Value) {
 		params := args[0]
 
 		if params.Kind() != reflect.Struct || len(ann.Hooks) == 0 {
@@ -641,6 +710,12 @@ func (ann *annotated) parameters() (
 
 		if value != zero {
 			out = append(out, value)
+		}
+
+		for _, r := range results {
+			if r.Type() != _typeOfError {
+				out = append(out, r)
+			}
 		}
 
 		return
