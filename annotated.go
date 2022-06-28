@@ -21,6 +21,7 @@
 package fx
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -195,6 +196,156 @@ func ResultTags(tags ...string) Annotation {
 	return resultTagsAnnotation{tags}
 }
 
+type _lifecycleHookAnnotationType int
+
+const (
+	_unknownHookType _lifecycleHookAnnotationType = iota
+	_onStartHookType
+	_onStopHookType
+)
+
+type lifecycleHookAnnotation struct {
+	Type          _lifecycleHookAnnotationType
+	Target        interface{}
+	_targetType   *reflect.Type
+	_targetParams *[]reflect.Type
+}
+
+func (la *lifecycleHookAnnotation) apply(ann *annotated) error {
+	if la.Target == nil {
+		return errors.New("cannot apply an empty lifecylce hook")
+	}
+
+	ann.Hooks = append(ann.Hooks, la)
+	return nil
+}
+
+var (
+	_typeOfLifecycle reflect.Type = reflect.TypeOf((*Lifecycle)(nil)).Elem()
+	_typeOfContext   reflect.Type = reflect.TypeOf((*Lifecycle)(nil)).Elem()
+)
+
+func (la *lifecycleHookAnnotation) targetType() (targetType reflect.Type) {
+	if la._targetType != nil {
+		return *la._targetType
+	}
+
+	targetType = reflect.TypeOf(la.Target)
+	la._targetType = &targetType
+	return
+}
+
+func (la *lifecycleHookAnnotation) parameters() (param []reflect.Type) {
+	if la._targetParams != nil {
+		return *la._targetParams
+	}
+
+	ft := la.targetType()
+	// omit first parameter as it should be a context.Context
+	types := make([]reflect.Type, ft.NumIn())
+	for i := 1; i < ft.NumIn(); i++ {
+		types[i] = ft.In(i)
+	}
+
+	params := []reflect.StructField{
+		{
+			Name:      "In",
+			Type:      _typeOfIn,
+			Anonymous: true,
+		},
+		{
+			Name: "Lifecycle",
+			Type: _typeOfLifecycle,
+		},
+	}
+
+	for i, t := range types {
+		params = append(params, reflect.StructField{
+			Name: fmt.Sprintf("Field%d", i),
+			Type: t,
+		})
+	}
+
+	param = []reflect.Type{reflect.StructOf(params)}
+	la._targetParams = &param
+	return
+}
+
+func (la *lifecycleHookAnnotation) buildHook(fn func(context.Context) error) (hook Hook) {
+	switch la.Type {
+	case _onStartHookType:
+		hook.OnStart = fn
+	case _onStopHookType:
+		hook.OnStop = fn
+	}
+
+	return
+}
+
+func (la *lifecycleHookAnnotation) Build() (*reflect.Value, error) {
+	ft := la.targetType()
+
+	if ft.Kind() != reflect.Func {
+		return nil, fmt.Errorf(
+			"must provide function for hook, got %v (%T)",
+			la.Target,
+			la.Target,
+		)
+	}
+
+	if ft.NumIn() < 1 || ft.In(0) != _typeOfContext {
+		return nil, fmt.Errorf(
+			"first argument of hook must be context.Context, got %v (%T)",
+			la.Target,
+			la.Target,
+		)
+	}
+
+	if (ft.NumOut() < 1 || ft.NumOut() > 1) &&
+		ft.Out(ft.NumOut()) != _typeOfError {
+		return nil, fmt.Errorf(
+			"hooks must return only an error type, got %v (%T)",
+			la.Target,
+			la.Target,
+		)
+	}
+
+	// build params with lifecycle
+	params := append([]reflect.Type{_typeOfLifecycle}, la.parameters()...)
+	origFn := reflect.ValueOf(la.Target)
+	newFnType := reflect.FuncOf(params, nil, false)
+
+	newFn := reflect.MakeFunc(newFnType, func(args []reflect.Value) []reflect.Value {
+		if len(args) > 0 {
+			o := args[0]
+			if lc, ok := o.Interface().(Lifecycle); ok {
+				hookFn := func(ctx context.Context) error {
+					// replace first argument with value of context
+					args[0] = reflect.ValueOf(ctx)
+					var results []reflect.Value
+					if ft.IsVariadic() {
+						results = origFn.CallSlice(args)
+					} else {
+						results = origFn.Call(args)
+					}
+
+					if len(results) > 0 && results[0].Type() == _typeOfError {
+						err, _ := results[0].Interface().(error)
+						return err
+					}
+
+					return nil
+				}
+
+				lc.Append(la.buildHook(hookFn))
+			}
+		}
+		return []reflect.Value{}
+	})
+
+	return &newFn, nil
+}
+
 type asAnnotation struct {
 	targets []interface{}
 }
@@ -265,6 +416,7 @@ type annotated struct {
 	ResultTags []string
 	As         [][]reflect.Type
 	FuncPtr    uintptr
+	Hooks      []*lifecycleHookAnnotation
 }
 
 func (ann annotated) String() string {
