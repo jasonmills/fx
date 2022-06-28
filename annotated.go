@@ -458,8 +458,8 @@ func (ann *annotated) Build() (interface{}, error) {
 	newFnType := reflect.FuncOf(paramTypes, resultTypes, false)
 	origFn := reflect.ValueOf(ann.Target)
 	ann.FuncPtr = origFn.Pointer()
-	newFn := reflect.MakeFunc(newFnType, func(args []reflect.Value) []reflect.Value {
-		args = remapParams(args)
+	newFn := reflect.MakeFunc(newFnType, func(origArgs []reflect.Value) []reflect.Value {
+		args := remapParams(origArgs)
 		var results []reflect.Value
 		if ft.IsVariadic() {
 			results = origFn.CallSlice(args)
@@ -467,6 +467,34 @@ func (ann *annotated) Build() (interface{}, error) {
 			results = origFn.Call(args)
 		}
 		results = remapResults(results)
+
+		// if the results are greater than zero and the final result
+		// is a non-nil error, do not execute hook installers
+		hasErrorResult := len(results) > 0 && results[len(results)-1].Type() == _typeOfError
+		if hasErrorResult {
+			err, ok := results[len(results)-1].Type().(error)
+			if ok && err != nil {
+				return results
+			}
+		}
+
+		offset := len(args) - 1
+		for i, hook := range ann.Hooks {
+			hookFn, err := hook.Build()
+			// if we failed to build a hook annotation and the constructor's
+			// last return value is a type of error, set to the hook build
+			// error and stop installing hooks
+			if err != nil && hasErrorResult {
+				results[len(results)-1] = reflect.ValueOf(err)
+				return results
+			}
+
+			if hookFn != nil && hookFn.Type().Kind() == reflect.Func {
+				hookArgs := []reflect.Value{origArgs[offset+i]}
+				hookFn.Call(hookArgs)
+			}
+		}
+
 		return results
 	})
 
