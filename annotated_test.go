@@ -1257,4 +1257,167 @@ func testHookAnnotations(t *testing.T) {
 		require.Contains(t, err.Error(), "cannot apply more than one")
 	})
 
+	t.Run("with Supply", func(t *testing.T) {
+		t.Skip()
+		t.Parallel()
+
+		type (
+			A interface{}
+		)
+
+		ch := make(chan string, 2)
+
+		cotr := fx.Provide(
+			fx.Annotate(
+				func(fmt.Stringer) A { return nil },
+				fx.OnStart(func(_ context.Context, s fmt.Stringer) error {
+					ch <- "a"
+					fmt.Printf("executing!\n")
+					require.Equal(t, "b", s.String())
+					return nil
+				}),
+			),
+		)
+
+		supply := fx.Supply(
+			fx.Supply(
+				fx.Annotate(
+					&asStringer{"b"},
+					fx.OnStart(func(_ context.Context) error {
+						ch <- "b"
+						return nil
+					}),
+					fx.As(new(fmt.Stringer)),
+				),
+			),
+		)
+
+		opts := fx.Options(
+			cotr,
+			supply,
+			fx.Invoke(func(A) {}),
+		)
+
+		app := fxtest.New(t, opts)
+		ctx := context.Background()
+		err := app.Start(ctx)
+		require.NoError(t, err)
+		require.NoError(t, app.Stop(ctx))
+		close(ch)
+
+		require.Equal(t, "a", <-ch)
+		require.Equal(t, "b", <-ch)
+	})
+
+	t.Run("with Decorate", func(t *testing.T) {
+		t.Skip()
+		t.Parallel()
+
+		type (
+			A interface{}
+		)
+
+		ch := make(chan string, 2)
+
+		cotr := fx.Provide(
+			fx.Annotate(
+				func() A { return nil },
+				fx.OnStart(func(_ context.Context) error {
+					ch <- "a"
+					return nil
+				}),
+			),
+		)
+
+		decorated := fx.Decorate(
+			fx.Annotate(
+				func(in A) A { return in },
+				fx.OnStart(func(_ context.Context) error {
+					ch <- "c"
+					return nil
+				}),
+			),
+		)
+
+		opts := fx.Options(
+			cotr,
+			decorated,
+			fx.Invoke(func(A) {}),
+		)
+
+		app := fxtest.New(t, opts)
+		ctx := context.Background()
+		err := app.Start(ctx)
+		require.NoError(t, err)
+		require.NoError(t, app.Stop(ctx))
+		close(ch)
+
+		require.Equal(t, "a", <-ch)
+		require.Equal(t, "c", <-ch)
+	})
+
+	t.Run("with Supply and Decorate", func(t *testing.T) {
+		t.Skip()
+		t.Parallel()
+
+		type (
+			A interface{}
+		)
+
+		ch := make(chan string, 3)
+
+		cotr := fx.Provide(
+			fx.Annotate(
+				func(fmt.Stringer) A { return nil },
+				fx.OnStart(func(_ context.Context, s fmt.Stringer) error {
+					ch <- "a"
+					fmt.Printf("executing!\n")
+					require.Equal(t, "b", s.String())
+					return nil
+				}),
+			),
+		)
+
+		supply := fx.Supply(
+			fx.Supply(
+				fx.Annotate(
+					&asStringer{"b"},
+					fx.OnStart(func(_ context.Context) error {
+						ch <- "b"
+						return nil
+					}),
+					fx.As(new(fmt.Stringer)),
+				),
+			),
+		)
+
+		decorated := fx.Decorate(
+			fx.Annotate(
+				func(in A, _ fmt.Stringer) A { return in },
+				fx.OnStart(func(_ context.Context) error {
+					ch <- "c"
+					return nil
+				}),
+			),
+		)
+
+		opts := fx.Options(
+			cotr,
+			supply,
+			decorated,
+			fx.Invoke(func(A) {}),
+		)
+
+		app := fxtest.New(t, opts)
+		ctx := context.Background()
+		err := app.Start(ctx)
+		require.NoError(t, err)
+		require.NoError(t, app.Stop(ctx))
+		close(ch)
+
+		require.Equal(t, "a", <-ch)
+		require.Equal(t, "b", <-ch)
+		require.Equal(t, "c", <-ch)
+	})
+
 }

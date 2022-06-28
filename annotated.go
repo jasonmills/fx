@@ -226,7 +226,7 @@ func (la *lifecycleHookAnnotation) apply(ann *annotated) error {
 	}
 
 	for _, h := range ann.Hooks {
-		if h.Type == la.Type {
+		if la.Type == h.Type {
 			return fmt.Errorf(
 				"cannot apply more than one %v hook annotation",
 				name,
@@ -623,6 +623,7 @@ func (ann *annotated) Build() (interface{}, error) {
 
 		for i, hook := range hooks {
 			hookArgs := hookParams(i, origArgs, results)
+			fmt.Printf("Hook Args: %+v\n", hookArgs)
 			hook.Call(hookArgs)
 		}
 
