@@ -222,7 +222,7 @@ func (la *lifecycleHookAnnotation) apply(ann *annotated) error {
 
 var (
 	_typeOfLifecycle reflect.Type = reflect.TypeOf((*Lifecycle)(nil)).Elem()
-	_typeOfContext   reflect.Type = reflect.TypeOf((*Lifecycle)(nil)).Elem()
+	_typeOfContext   reflect.Type = reflect.TypeOf((*context.Context)(nil)).Elem()
 )
 
 func (la *lifecycleHookAnnotation) targetType() (targetType reflect.Type) {
@@ -242,7 +242,7 @@ func (la *lifecycleHookAnnotation) parameters() (param reflect.Type) {
 
 	ft := la.targetType()
 	// omit first parameter as it should be a context.Context
-	types := make([]reflect.Type, ft.NumIn())
+	types := make([]reflect.Type, 0)
 	for i := 1; i < ft.NumIn(); i++ {
 		types[i] = ft.In(i)
 	}
@@ -282,11 +282,13 @@ func (la *lifecycleHookAnnotation) buildHook(fn func(context.Context) error) (ho
 	return
 }
 
-func (la *lifecycleHookAnnotation) Build() (*reflect.Value, error) {
+func (la *lifecycleHookAnnotation) Build() (reflect.Value, error) {
 	ft := la.targetType()
 
+	var newFn reflect.Value
+
 	if ft.Kind() != reflect.Func {
-		return nil, fmt.Errorf(
+		return newFn, fmt.Errorf(
 			"must provide function for hook, got %v (%T)",
 			la.Target,
 			la.Target,
@@ -294,7 +296,7 @@ func (la *lifecycleHookAnnotation) Build() (*reflect.Value, error) {
 	}
 
 	if ft.NumIn() < 1 || ft.In(0) != _typeOfContext {
-		return nil, fmt.Errorf(
+		return newFn, fmt.Errorf(
 			"first argument of hook must be context.Context, got %v (%T)",
 			la.Target,
 			la.Target,
@@ -303,7 +305,7 @@ func (la *lifecycleHookAnnotation) Build() (*reflect.Value, error) {
 
 	if (ft.NumOut() < 1 || ft.NumOut() > 1) &&
 		ft.Out(ft.NumOut()) != _typeOfError {
-		return nil, fmt.Errorf(
+		return newFn, fmt.Errorf(
 			"hooks must return only an error type, got %v (%T)",
 			la.Target,
 			la.Target,
@@ -315,11 +317,11 @@ func (la *lifecycleHookAnnotation) Build() (*reflect.Value, error) {
 	origFn := reflect.ValueOf(la.Target)
 	newFnType := reflect.FuncOf(params, nil, false)
 
-	newFn := reflect.MakeFunc(newFnType, func(args []reflect.Value) []reflect.Value {
+	newFn = reflect.MakeFunc(newFnType, func(args []reflect.Value) []reflect.Value {
 		// first arg is the In type; second is the lifecycle type, remainer
 		// are the dynamic hook arguments
-		if len(args) >= 2 {
-			o := args[1]
+		if len(args) != 0 {
+			o := args[0].FieldByName("Lifecycle")
 			if lc, ok := o.Interface().(Lifecycle); ok {
 				hookFn := func(ctx context.Context) error {
 					// replace first argument with value of context
@@ -345,7 +347,7 @@ func (la *lifecycleHookAnnotation) Build() (*reflect.Value, error) {
 		return []reflect.Value{}
 	})
 
-	return &newFn, nil
+	return newFn, nil
 }
 
 // OnStart TBD
@@ -465,15 +467,26 @@ func (ann *annotated) Build() (interface{}, error) {
 		return nil, fmt.Errorf("invalid annotation function %T: %w", ann.Target, err)
 	}
 
-	paramTypes, remapParams := ann.parameters()
+	paramTypes, remapParams, hookParams := ann.parameters()
 	resultTypes, remapResults, err := ann.results()
 	if err != nil {
 		return nil, err
 	}
 
+	var hooks []reflect.Value
+	for _, hook := range ann.Hooks {
+		hookFn, err := hook.Build()
+		if err != nil {
+			return nil, err
+		}
+
+		hooks = append(hooks, hookFn)
+	}
+
 	newFnType := reflect.FuncOf(paramTypes, resultTypes, false)
 	origFn := reflect.ValueOf(ann.Target)
 	ann.FuncPtr = origFn.Pointer()
+
 	newFn := reflect.MakeFunc(newFnType, func(origArgs []reflect.Value) []reflect.Value {
 		args := remapParams(origArgs)
 		var results []reflect.Value
@@ -494,21 +507,10 @@ func (ann *annotated) Build() (interface{}, error) {
 			}
 		}
 
-		offset := len(args) - 1
-		for i, hook := range ann.Hooks {
-			hookFn, err := hook.Build()
-			// if we failed to build a hook annotation and the constructor's
-			// last return value is a type of error, set to the hook build
-			// error and stop installing hooks
-			if err != nil && hasErrorResult {
-				results[len(results)-1] = reflect.ValueOf(err)
-				return results
-			}
-
-			if hookFn != nil && hookFn.Type().Kind() == reflect.Func {
-				hookArgs := []reflect.Value{origArgs[offset+i]}
-				hookFn.Call(hookArgs)
-			}
+		for i, hook := range hooks {
+			hookArgs := hookParams(i, origArgs)
+			// TODO: assign hookArgs that are of the same type as constructor results
+			hook.Call(hookArgs)
 		}
 
 		return results
@@ -550,6 +552,7 @@ func (ann *annotated) typeCheckOrigFn() error {
 func (ann *annotated) parameters() (
 	types []reflect.Type,
 	remap func([]reflect.Value) []reflect.Value,
+	hookValueMap func(int, []reflect.Value) []reflect.Value,
 ) {
 	ft := reflect.TypeOf(ann.Target)
 
@@ -560,10 +563,10 @@ func (ann *annotated) parameters() (
 
 	// No parameter annotations. Return the original types
 	// and an identity function.
-	if len(ann.ParamTags) == 0 && !ft.IsVariadic() {
+	if len(ann.ParamTags) == 0 && !ft.IsVariadic() && len(ann.Hooks) == 0 {
 		return types, func(args []reflect.Value) []reflect.Value {
 			return args
-		}
+		}, func(int, []reflect.Value) (out []reflect.Value) { return }
 	}
 
 	// Turn parameters into an fx.In struct.
@@ -596,15 +599,16 @@ func (ann *annotated) parameters() (
 	// append required types for hooks to types field, but do not
 	// include them as params in constructor call
 	for h, t := range ann.Hooks {
-		field := reflect.StructField{
+		params := t.parameters()
+		inFields = append(inFields, reflect.StructField{
 			Name: fmt.Sprintf("Hook%d", h),
-			Type: t.parameters(),
-		}
-		inFields = append(inFields, field)
+			Type: params,
+		})
 	}
 
 	types = []reflect.Type{reflect.StructOf(inFields)}
-	return types, func(args []reflect.Value) []reflect.Value {
+
+	remap = func(args []reflect.Value) []reflect.Value {
 		params := args[0]
 		args = args[:0]
 		for i := 0; i < ft.NumIn(); i++ {
@@ -612,6 +616,27 @@ func (ann *annotated) parameters() (
 		}
 		return args
 	}
+
+	hookValueMap = func(hook int, args []reflect.Value) (out []reflect.Value) {
+		params := args[0]
+
+		if params.Kind() != reflect.Struct || len(ann.Hooks) == 0 {
+			return
+		}
+
+		var zero reflect.Value
+		value := params.FieldByNameFunc(func(name string) bool {
+			return name == fmt.Sprintf("Hook%d", hook)
+		})
+
+		if value != zero {
+			out = append(out, value)
+		}
+
+		return
+	}
+
+	return
 }
 
 // results returns the types of the results of the annotated function,

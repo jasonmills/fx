@@ -22,6 +22,7 @@ package fx_test
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -983,4 +984,74 @@ func TestAnnotate(t *testing.T) {
 		assert.Contains(t, err.Error(), "invalid annotation function func(fx_test.B) string")
 		assert.Contains(t, err.Error(), "fx.In structs cannot be annotated")
 	})
+
+	t.Run("Hooks", testHookAnnotations)
+}
+
+func testHookAnnotations(t *testing.T) {
+	t.Parallel()
+
+	t.Run("start and stop without dependencies", func(t *testing.T) {
+		t.Parallel()
+
+		type stub interface{}
+
+		var (
+			invoked bool
+			started bool
+			stopped bool
+		)
+
+		app := fxtest.New(t,
+			fx.Provide(
+				fx.Annotate(
+					func() (stub, error) { return nil, nil },
+					fx.OnStart(func(context.Context) error {
+						started = true
+						return nil
+					}),
+					fx.OnStop(func(context.Context) error {
+						stopped = true
+						return nil
+					}),
+				),
+			),
+			fx.Invoke(func(s stub) {
+				invoked = s == nil
+			}),
+		)
+
+		ctx := context.Background()
+		assert.False(t, started)
+		require.NoError(t, app.Start(ctx))
+		assert.True(t, invoked)
+		assert.True(t, started)
+		assert.False(t, stopped)
+		require.NoError(t, app.Stop(ctx))
+		assert.True(t, stopped)
+
+	})
+
+	t.Run("hook that returns error", func(t *testing.T) {
+		t.Parallel()
+
+		type stub interface{}
+
+		app := fxtest.New(t,
+			fx.Provide(
+				fx.Annotate(
+					func() (stub, error) { return nil, nil },
+					fx.OnStart(func(context.Context) error {
+						return errors.New("hook failed")
+					}),
+				),
+			),
+			fx.Invoke(func(stub) {}),
+		)
+
+		err := app.Start(context.Background())
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "hook failed")
+	})
+
 }
