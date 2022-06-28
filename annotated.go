@@ -242,7 +242,8 @@ func (la *lifecycleHookAnnotation) parameters() (param reflect.Type) {
 
 	ft := la.targetType()
 	// omit first parameter as it should be a context.Context
-	types := make([]reflect.Type, 0)
+	types := make([]reflect.Type, ft.NumIn())
+
 	for i := 1; i < ft.NumIn(); i++ {
 		types[i] = ft.In(i)
 	}
@@ -259,11 +260,14 @@ func (la *lifecycleHookAnnotation) parameters() (param reflect.Type) {
 		},
 	}
 
+	var zero reflect.Type
 	for i, t := range types {
-		params = append(params, reflect.StructField{
-			Name: fmt.Sprintf("Field%d", i),
-			Type: t,
-		})
+		if t != zero && t.Kind() != reflect.Invalid {
+			params = append(params, reflect.StructField{
+				Name: fmt.Sprintf("Field%d", i),
+				Type: t,
+			})
+		}
 	}
 
 	param = reflect.StructOf(params)
@@ -324,13 +328,19 @@ func (la *lifecycleHookAnnotation) Build() (reflect.Value, error) {
 			o := args[0].FieldByName("Lifecycle")
 			if lc, ok := o.Interface().(Lifecycle); ok {
 				hookFn := func(ctx context.Context) error {
-					// replace first argument with value of context
-					args[0] = reflect.ValueOf(ctx)
+					fnArgs := []reflect.Value{
+						reflect.ValueOf(ctx),
+					}
+					if args[0].NumField() > 2 {
+						for i := 2; i < args[0].NumField(); i++ {
+							fnArgs = append(fnArgs, args[0].Field(i))
+						}
+					}
 					var results []reflect.Value
 					if ft.IsVariadic() {
-						results = origFn.CallSlice(args)
+						results = origFn.CallSlice(fnArgs)
 					} else {
-						results = origFn.Call(args)
+						results = origFn.Call(fnArgs)
 					}
 
 					if len(results) > 0 && results[0].Type() == _typeOfError {

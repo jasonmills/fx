@@ -1032,7 +1032,114 @@ func testHookAnnotations(t *testing.T) {
 
 	})
 
-	t.Run("hook that returns error", func(t *testing.T) {
+	t.Run("depedency chain", func(t *testing.T) {
+		t.Parallel()
+
+		type (
+			a interface{}
+			b interface{}
+			c interface{}
+		)
+
+		var aHook, bHook bool
+
+		app := fxtest.New(t,
+			fx.Provide(
+				fx.Annotate(
+					func() (a, error) { return nil, nil },
+					fx.OnStart(func(context.Context) error {
+						aHook = true
+						return nil
+					}),
+				),
+			),
+			fx.Provide(
+				fx.Annotate(
+					func() (b, error) { return nil, nil },
+					fx.OnStart(func(context.Context) error {
+						bHook = true
+						return nil
+					}),
+				),
+			),
+			fx.Provide(func(a, b) c { return nil }),
+			fx.Invoke(func(c) {}),
+		)
+
+		ctx := context.Background()
+		assert.False(t, aHook)
+		assert.False(t, bHook)
+		require.NoError(t, app.Start(ctx))
+		assert.True(t, aHook)
+		assert.True(t, bHook)
+		require.NoError(t, app.Stop(ctx))
+	})
+
+	t.Run("with extra dependency parameter", func(t *testing.T) {
+		t.Parallel()
+
+		type (
+			a interface{}
+			b interface{}
+			c interface{}
+		)
+
+		var aHook bool
+
+		app := fxtest.New(t,
+			fx.Provide(
+				fx.Annotate(
+					func() (a, error) { return nil, nil },
+					fx.OnStart(func(context.Context, b) error {
+						aHook = true
+						return nil
+					}),
+				),
+			),
+			fx.Provide(func() b { return nil }),
+			fx.Provide(func(a, b) c { return nil }),
+			fx.Invoke(func(c) {}),
+		)
+
+		ctx := context.Background()
+		assert.False(t, aHook)
+		require.NoError(t, app.Start(ctx))
+		defer func() {
+			require.NoError(t, app.Stop(ctx))
+		}()
+		assert.True(t, aHook)
+	})
+
+	t.Run("with unprovided dependency", func(t *testing.T) {
+		t.Parallel()
+
+		type (
+			a interface{}
+			b interface{}
+		)
+
+		validateApp := func(t *testing.T, opts ...fx.Option) error {
+			return fx.ValidateApp(
+				append(opts, fx.Logger(fxtest.NewTestPrinter(t)))...,
+			)
+		}
+		err := validateApp(t,
+			fx.Provide(
+				fx.Annotate(
+					func() (a, error) { return nil, nil },
+					fx.OnStart(func(context.Context, b) error {
+						return nil
+					}),
+				),
+			),
+			fx.Invoke(func(a) {}),
+		)
+
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "missing type: fx_test.b")
+	})
+
+	t.Run("that returns error", func(t *testing.T) {
 		t.Parallel()
 
 		type stub interface{}
