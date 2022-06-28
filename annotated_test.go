@@ -991,6 +991,45 @@ func TestAnnotate(t *testing.T) {
 func testHookAnnotations(t *testing.T) {
 	t.Parallel()
 
+	t.Run("depend on result interface of target", func(t *testing.T) {
+		type stub interface {
+			String() string
+		}
+
+		var started bool
+
+		app := fxtest.New(t,
+			fx.Provide(
+				fx.Annotate(
+					func() (stub, error) {
+						b := []byte("expected")
+						return bytes.NewBuffer(b), nil
+					},
+					fx.OnStart(func(_ context.Context, s stub) error {
+						started = true
+						if !assert.Equal(t, "expected", s.String()) {
+							return fmt.Errorf(
+								"expected %q got %q",
+								"expected",
+								s.String(),
+							)
+						}
+						return nil
+					}),
+				),
+			),
+			fx.Invoke(func(s stub) {
+				require.Equal(t, "expected", s.String())
+			}),
+		)
+
+		ctx := context.Background()
+		assert.False(t, started)
+		require.NoError(t, app.Start(ctx))
+		assert.True(t, started)
+		require.NoError(t, app.Stop(ctx))
+	})
+
 	t.Run("start and stop without dependencies", func(t *testing.T) {
 		t.Parallel()
 
