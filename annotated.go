@@ -601,8 +601,10 @@ func (ann *annotated) Build() (interface{}, error) {
 	origFn := reflect.ValueOf(ann.Target)
 	ann.FuncPtr = origFn.Pointer()
 
-	newFn := reflect.MakeFunc(newFnType, func(origArgs []reflect.Value) []reflect.Value {
-		args := remapParams(origArgs)
+	newFn := reflect.MakeFunc(newFnType, func(args []reflect.Value) []reflect.Value {
+		origArgs := make([]reflect.Value, len(args))
+		copy(origArgs, args)
+		args = remapParams(args)
 		var results []reflect.Value
 		if ft.IsVariadic() {
 			results = origFn.CallSlice(args)
@@ -623,7 +625,6 @@ func (ann *annotated) Build() (interface{}, error) {
 
 		for i, hook := range hooks {
 			hookArgs := hookParams(i, origArgs, results)
-			fmt.Printf("Hook Args: %+v\n", hookArgs)
 			hook.Call(hookArgs)
 		}
 
@@ -735,17 +736,19 @@ func (ann *annotated) parameters(results ...reflect.Type) (
 	hookValueMap = func(hook int, args []reflect.Value, results []reflect.Value) (out []reflect.Value) {
 		params := args[0]
 
-		if params.Kind() != reflect.Struct || len(ann.Hooks) == 0 {
+		if len(ann.Hooks) == 0 {
 			return
 		}
 
-		var zero reflect.Value
-		value := params.FieldByNameFunc(func(name string) bool {
-			return name == fmt.Sprintf("Hook%d", hook)
-		})
+		if params.Kind() == reflect.Struct {
+			var zero reflect.Value
+			value := params.FieldByNameFunc(func(name string) bool {
+				return name == fmt.Sprintf("Hook%d", hook)
+			})
 
-		if value != zero {
-			out = append(out, value)
+			if value != zero {
+				out = append(out, value)
+			}
 		}
 
 		for _, r := range results {

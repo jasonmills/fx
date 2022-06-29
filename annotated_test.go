@@ -1310,30 +1310,26 @@ func testHookAnnotations(t *testing.T) {
 	})
 
 	t.Run("with Decorate", func(t *testing.T) {
-		t.Skip()
 		t.Parallel()
 
 		type (
-			A interface{}
+			A interface {
+				WriteString(string) (int, error)
+			}
 		)
 
-		ch := make(chan string, 2)
+		buf := bytes.NewBuffer(nil)
+		cotr := fx.Provide(func() A { return buf })
 
-		cotr := fx.Provide(
-			fx.Annotate(
-				func() A { return nil },
-				fx.OnStart(func(_ context.Context) error {
-					ch <- "a"
-					return nil
-				}),
-			),
-		)
-
+		var called bool
 		decorated := fx.Decorate(
 			fx.Annotate(
-				func(in A) A { return in },
+				func(in A) A {
+					in.WriteString("decorated")
+					return in
+				},
 				fx.OnStart(func(_ context.Context) error {
-					ch <- "c"
+					called = true
 					return nil
 				}),
 			),
@@ -1350,10 +1346,8 @@ func testHookAnnotations(t *testing.T) {
 		err := app.Start(ctx)
 		require.NoError(t, err)
 		require.NoError(t, app.Stop(ctx))
-		close(ch)
-
-		require.Equal(t, "a", <-ch)
-		require.Equal(t, "c", <-ch)
+		require.True(t, called)
+		require.Equal(t, "decorated", buf.String())
 	})
 
 	t.Run("with Supply and Decorate", func(t *testing.T) {
