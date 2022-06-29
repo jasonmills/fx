@@ -1258,37 +1258,34 @@ func testHookAnnotations(t *testing.T) {
 	})
 
 	t.Run("with Supply", func(t *testing.T) {
-		t.Skip()
 		t.Parallel()
 
 		type (
-			A interface{}
+			A interface {
+				WriteString(string) (int, error)
+			}
 		)
 
-		ch := make(chan string, 2)
-
+		buf := bytes.NewBuffer(nil)
 		cotr := fx.Provide(
 			fx.Annotate(
-				func(fmt.Stringer) A { return nil },
-				fx.OnStart(func(_ context.Context, s fmt.Stringer) error {
-					ch <- "a"
-					fmt.Printf("executing!\n")
-					require.Equal(t, "b", s.String())
+				func() A {
+					return buf
+				},
+				fx.OnStart(func(_ context.Context, a A, s fmt.Stringer) error {
+					a.WriteString(s.String())
 					return nil
 				}),
 			),
 		)
 
 		supply := fx.Supply(
-			fx.Supply(
-				fx.Annotate(
-					&asStringer{"b"},
-					fx.OnStart(func(_ context.Context) error {
-						ch <- "b"
-						return nil
-					}),
-					fx.As(new(fmt.Stringer)),
-				),
+			fx.Annotate(
+				&asStringer{"supply"},
+				fx.OnStart(func(_ context.Context) error {
+					return nil
+				}),
+				fx.As(new(fmt.Stringer)),
 			),
 		)
 
@@ -1303,10 +1300,7 @@ func testHookAnnotations(t *testing.T) {
 		err := app.Start(ctx)
 		require.NoError(t, err)
 		require.NoError(t, app.Stop(ctx))
-		close(ch)
-
-		require.Equal(t, "a", <-ch)
-		require.Equal(t, "b", <-ch)
+		require.Equal(t, "supply", buf.String())
 	})
 
 	t.Run("with Decorate", func(t *testing.T) {
@@ -1328,8 +1322,9 @@ func testHookAnnotations(t *testing.T) {
 					in.WriteString("decorated")
 					return in
 				},
-				fx.OnStart(func(_ context.Context) error {
-					called = true
+				fx.OnStart(func(_ context.Context, a A) error {
+					// assert that the interface we get is the decorated one
+					called = assert.Equal(t, "decorated", buf.String())
 					return nil
 				}),
 			),
@@ -1362,7 +1357,7 @@ func testHookAnnotations(t *testing.T) {
 
 		cotr := fx.Provide(
 			fx.Annotate(
-				func(fmt.Stringer) A { return nil },
+				func() A { return nil },
 				fx.OnStart(func(_ context.Context, s fmt.Stringer) error {
 					ch <- "a"
 					fmt.Printf("executing!\n")
@@ -1373,21 +1368,19 @@ func testHookAnnotations(t *testing.T) {
 		)
 
 		supply := fx.Supply(
-			fx.Supply(
-				fx.Annotate(
-					&asStringer{"b"},
-					fx.OnStart(func(_ context.Context) error {
-						ch <- "b"
-						return nil
-					}),
-					fx.As(new(fmt.Stringer)),
-				),
+			fx.Annotate(
+				&asStringer{"b"},
+				fx.OnStart(func(_ context.Context) error {
+					ch <- "b"
+					return nil
+				}),
+				fx.As(new(fmt.Stringer)),
 			),
 		)
 
 		decorated := fx.Decorate(
 			fx.Annotate(
-				func(in A, _ fmt.Stringer) A { return in },
+				func(in A) A { return in },
 				fx.OnStart(func(_ context.Context) error {
 					ch <- "c"
 					return nil

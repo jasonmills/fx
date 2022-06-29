@@ -438,7 +438,9 @@ func (la *lifecycleHookAnnotation) Build(results ...reflect.Type) (reflect.Value
 	newFnType := reflect.FuncOf(params, nil, false)
 	newFn = reflect.MakeFunc(newFnType, func(args []reflect.Value) []reflect.Value {
 		var lc Lifecycle
+		fmt.Printf("original hook args: %+v\n", args)
 		lc, args = paramMap(args)
+		fmt.Printf("mapped hook args: %+v\n", args)
 		hookFn := func(ctx context.Context) error {
 			args[0] = reflect.ValueOf(ctx)
 
