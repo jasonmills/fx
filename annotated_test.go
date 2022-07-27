@@ -291,6 +291,27 @@ func TestAnnotatedAs(t *testing.T) {
 			invoke: func(r io.Reader) {
 			},
 		},
+		{
+			desc: "annotate constructor with parameters and As",
+			provide: fx.Options(
+				fx.Provide(fx.Annotate(
+					bytes.NewBuffer([]byte("test")),
+					fx.As(new(io.Reader)),
+				)),
+				fx.Provide(fx.Annotate(
+					func(r io.Reader) *bytes.Buffer {
+						b, err := io.ReadAll(r)
+						assert.NoError(t, err)
+						assert.NotEmpty(t, b)
+						return bytes.NewBuffer(b)
+					},
+					fx.As(new(fmt.Stringer)),
+				)),
+			),
+			invoke: func(s fmt.Stringer) {
+				assert.Equal(t, "test", s.String())
+			},
+		},
 	}
 
 	for _, tt := range tests {
