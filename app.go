@@ -281,6 +281,7 @@ type App struct {
 	err       error
 	clock     fxclock.Clock
 	lifecycle *lifecycleWrapper
+	stopch    chan struct{} // closed when Stop is called
 
 	container *dig.Container
 	root      *module
@@ -295,13 +296,12 @@ type App struct {
 	// Decides how we react to errors when building the graph.
 	errorHooks []ErrorHandler
 	validate   bool
+
 	// Used to signal shutdowns.
-	donesMu        sync.Mutex // guards dones and shutdownSig
-	dones          []chan os.Signal
-	shutdownSig    os.Signal
-	waitsMu        sync.Mutex // guards waits and shutdownCode
-	waits          []chan ShutdownSignal
-	shutdownSignal *ShutdownSignal
+	shutdownMu   sync.Mutex // guards sigReceivers and shutdownSig
+	sigReceivers []signalReceiver
+	shutdownSig  *ShutdownSignal
+	signalOnce   sync.Once
 
 	// Used to make sure Start/Stop is called only once.
 	runStart sync.Once
@@ -447,6 +447,7 @@ func New(opts ...Option) *App {
 		clock:        fxclock.System,
 		startTimeout: DefaultTimeout,
 		stopTimeout:  DefaultTimeout,
+		stopch:       make(chan struct{}),
 	}
 	app.root = &module{app: app}
 	app.modules = append(app.modules, app.root)
@@ -715,6 +716,7 @@ func (app *App) Stop(ctx context.Context) (err error) {
 		// Protect the Stop hooks from being called multiple times.
 		defer func() {
 			app.log.LogEvent(&fxevent.Stopped{Err: err})
+			close(app.stopch)
 		}()
 
 		err = withTimeout(ctx, &withTimeoutParams{
@@ -735,36 +737,49 @@ func (app *App) Stop(ctx context.Context) (err error) {
 // Alternatively, a signal can be broadcast to all done channels manually by
 // using the Shutdown functionality (see the Shutdowner documentation for details).
 func (app *App) Done() <-chan os.Signal {
-	c := make(chan os.Signal, 1)
-
-	app.donesMu.Lock()
-	defer app.donesMu.Unlock()
-	// If shutdown signal has been received already
-	// send it and return. If not, wait for user to send a termination
-	// signal.
-	if app.shutdownSig != nil {
-		c <- app.shutdownSig
-		return c
-	}
-
-	signal.Notify(c, os.Interrupt, _sigINT, _sigTERM)
-	app.dones = append(app.dones, c)
-	return c
+	rcv, ch := newOSSignalReceiver()
+	app.appendSignalReceiver(rcv)
+	return ch
 }
 
 func (app *App) Wait() <-chan ShutdownSignal {
-	c := make(chan ShutdownSignal, 1)
+	rcv, ch := newShutdownSignalReceiver()
+	app.appendSignalReceiver(rcv)
+	return ch
+}
 
-	app.waitsMu.Lock()
-	defer app.waitsMu.Unlock()
+func (app *App) appendSignalReceiver(r signalReceiver) {
+	app.shutdownMu.Lock()
+	defer app.shutdownMu.Unlock()
 
-	if app.shutdownSignal != nil {
-		c <- *app.shutdownSignal
-		return c
+	// If shutdown signal has been received already
+	// send it and return.
+	// If not, wait for user to send a termination signal.
+	if sig := app.shutdownSig; sig != nil {
+		// Ignore the error from ReceiveSignal.
+		// This is a newly created channel and can't possibly be
+		// blocked.
+		_ = r.ReceiveShutdownSignal(*sig)
+		return
 	}
 
-	app.waits = append(app.waits, c)
-	return c
+	app.sigReceivers = append(app.sigReceivers, r)
+
+	// The first time either Wait or Done is called,
+	// register an OS signal handler
+	// and make that broadcast the signal to all sigReceivers
+	// regardless of whether they're Wait or Done based.
+	app.signalOnce.Do(func() {
+		sigch := make(chan os.Signal, 1)
+		signal.Notify(sigch, os.Interrupt, _sigINT, _sigTERM)
+		go func() {
+			select {
+			case sig := <-sigch:
+				app.broadcastSignal(sig, 1)
+			case <-app.stopch:
+			}
+		}()
+	})
 }
 
 // StartTimeout returns the configured startup timeout. Apps default to using
